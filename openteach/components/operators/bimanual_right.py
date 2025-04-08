@@ -13,7 +13,7 @@ from copy import deepcopy as copy
 from scipy.spatial.transform import Rotation
 
 prev_position = None
-move_threshold = 0.00  # 定义位置和姿态的变化阈值
+move_threshold = 0.00  # Define position and pose change threshold
 
 
 ARM_TELEOP_STOP = 0
@@ -35,17 +35,17 @@ OCULUS_JOINTS = {
     'pinky': [15, 16, 17, 18, 23]
 }
 def convert_to_pose(matrix_4x3):
-        # 提取位置数据 (xyz)
-        position = matrix_4x3[3, :3]  # 使用最后一行的前三个元素
+        # Extract position data (xyz)
+        position = matrix_4x3[3, :3]  # Use the first three elements of the last row
         
-        # 提取旋转矩阵
-        rotation_matrix = matrix_4x3[:3, :3]  # 取前3行3列作为旋转矩阵
+        # Extract rotation matrix
+        rotation_matrix = matrix_4x3[:3, :3]  # Take the first 3 rows and 3 columns as rotation matrix
         
-        # 将旋转矩阵转化为四元数
+        # Convert the rotation matrix to quaternion
         rotation = Rotation.from_matrix(rotation_matrix)
-        quaternion = rotation.as_quat()  # 四元数格式为 [x, y, z, w]
+        quaternion = rotation.as_quat()  # Quaternion format is [x, y, z, w]
         
-        # 返回包含位置和四元数的姿态
+        # Return pose containing position and quaternion
         pose = {
             'position': position.tolist(),
             'quaternion': quaternion.tolist()
@@ -55,22 +55,22 @@ np.set_printoptions(precision=2, suppress=True)
 
 
 def create_homogeneous_matrix(position, quaternion):
-    # position 是一个包含 x, y, z 的列表或数组
+    # position is a list or array containing x, y, z
     if len(position) != 3:
         raise ValueError("Position must have exactly three components (x, y, z).")
     
-    # quaternion 是一个包含四元数 [qw, qx, qy, qz] 的列表或数组
+    # quaternion is a list or array containing quaternion [qw, qx, qy, qz]
     if len(quaternion) != 4:
         raise ValueError("Quaternion must have exactly four components [qw, qx, qy, qz].")
     
-    # 通过四元数生成旋转矩阵
-    rotation = Rotation.from_quat(quaternion)  # 使用 scipy 的 Rotation 类
-    rotation_matrix = rotation.as_matrix()  # 得到 3x3 旋转矩阵
+    # Generate rotation matrix from quaternion
+    rotation = Rotation.from_quat(quaternion)  # Using scipy's Rotation class
+    rotation_matrix = rotation.as_matrix()  # Get 3x3 rotation matrix
     
-    # 创建一个 4x4 的齐次变换矩阵
-    homo_matrix = np.eye(4)  # 初始化为单位矩阵
-    homo_matrix[:3, :3] = rotation_matrix  # 填入旋转矩阵
-    homo_matrix[:3, 3] = position  # 将位置填入最后一列
+    # Create a 4x4 homogeneous transformation matrix
+    homo_matrix = np.eye(4)  # Initialize as identity matrix
+    homo_matrix[:3, :3] = rotation_matrix  # Fill in rotation matrix
+    homo_matrix[:3, 3] = position  # Put position in the last column
 
     return homo_matrix
 
@@ -90,7 +90,7 @@ class Filter:
         return np.concatenate([self.pos_state, self.ori_state])
 
 
-# Airbot操作类
+# Airbot operator class
 class AirbotRightOperator(Operator):
     def __init__(
         self,
@@ -105,7 +105,7 @@ class AirbotRightOperator(Operator):
         cartesian_command_publisher_port = None
     ):
         self.notify_component_start('airbot operator')
-        # 订阅器，用于获取变换后的手部关键点
+        # Subscriber for transformed hand keypoints
         self._transformed_hand_keypoint_subscriber = ZMQKeypointSubscriber(
             host=host,
             port=transformed_keypoints_port,
@@ -137,17 +137,17 @@ class AirbotRightOperator(Operator):
             port=cartesian_command_publisher_port
         )    
 
-        # 初始化机器人控制器
+        # Initialize robot controller
         self._robot = AirbotArmRight()
-        self.resolution_scale = 1  # 默认分辨率比例
-        self.arm_teleop_state = ARM_TELEOP_STOP  # 默认状态为停止
+        self.resolution_scale = 1  # Default resolution scale
+        self.arm_teleop_state = ARM_TELEOP_STOP  # Default state is stopped
         self.gripper_correct_state =0
         self.pause_flag=0
         self.prev_gripper_flag=0
         self.gripper_flag=1
         self.pause_cnt=0
 
-        # 订阅器，用于获取分辨率和遥控状态
+        # Subscriber for resolution and teleop state
         self._arm_resolution_subscriber = ZMQKeypointSubscriber(
             host = host,
             port = arm_resolution_port,
@@ -160,7 +160,7 @@ class AirbotRightOperator(Operator):
         #     topic = 'pause'
         # )
 
-        # 机器人初始位置
+        # Robot initial position
         self.robot_init_position = self.robot.get_cartesian_state()
         self.is_first_frame = True
 
@@ -171,17 +171,18 @@ class AirbotRightOperator(Operator):
 
         self._timer = FrequencyTimer(VR_FREQ)
 
-        # Class variables
-        self.gripper_flag=1
-        self.pause_flag=1
-        self.prev_pause_flag=0
-        self.is_first_frame= True
-        self.gripper_cnt=0
-        self.prev_gripper_flag=0
-        self.pause_cnt=0
-        self.gripper_correct_state=1
+        # Class Variables
         self.resolution_scale =1
         self.arm_teleop_state = ARM_TELEOP_STOP
+        self.is_first_frame= True
+        self.prev_gripper_flag=0
+        self.prev_pause_flag=0
+        self.pause_cnt=0
+        self.gripper_correct_state=1
+        self.gripper_flag=1
+        self.pause_flag=1
+        self.gripper_cnt=0
+
 
     @property
     def timer(self):
@@ -304,6 +305,7 @@ class AirbotRightOperator(Operator):
         if pause_state!= self.prev_pause_flag:
             pause_status= True 
         return pause_state , pause_status , pause_right
+    
     def get_gripper_state_from_hand_keypoints(self):
         transformed_hand_coords= self.transformed_hand_keypoint_subscriber.recv_keypoints()
         pinky_distance = np.linalg.norm(transformed_hand_coords[OCULUS_JOINTS['pinky'][-1]]- transformed_hand_coords[OCULUS_JOINTS['thumb'][-1]])
@@ -327,17 +329,16 @@ class AirbotRightOperator(Operator):
     # Apply the retargeted angles
     def _apply_retargeted_angles(self, log=False):
         global prev_position
-        # 检查是否需要重置操作状态
+        # Check if the operation state needs to be reset
         new_arm_teleop_state,pause_status,pause_left = self._get_arm_teleop_state_from_hand_keypoints()
         if new_arm_teleop_state == ARM_TELEOP_STOP:
             print("Right arm is stopped")
-            return  # 直接返回，不进行任何更新
-        
+            return  # Return directly, no updates
         if self.is_first_frame or (self.arm_teleop_state == ARM_TELEOP_STOP and new_arm_teleop_state == ARM_TELEOP_CONT):
-            self._reset_teleop()  # 重置操作
+            self._reset_teleop()  # Reset operation
             moving_hand_frame = None
         else:
-            moving_hand_frame = self._get_hand_frame()  # 获取当前手部框架
+            moving_hand_frame = self._get_hand_frame()  # Get current hand frame
         self.arm_teleop_state = new_arm_teleop_state
         # print(moving_hand_frame)
         arm_teleoperation_scale_mode = self._get_resolution_scale_mode()
@@ -354,19 +355,19 @@ class AirbotRightOperator(Operator):
             gripper_state = 1
         elif self.gripper_correct_state == GRIPPER_CLOSE:
             gripper_state = 0
-        # 若未获取到手部框架，返回
+        # If hand frame is not obtained, return
         if moving_hand_frame is None:
             return
         # print(self.gripper_correct_state)
         self.hand_moving_H = self._turn_frame_to_homo_mat(moving_hand_frame)
 
         # Transformation code
-        H_HI_HH = copy(self.hand_init_H) #从“手部初始位置（HI）”转换到“手部当前位置（HH）”的齐次矩阵
-        H_HT_HH = copy(self.hand_moving_H) #从“手部当前帧（HT）”转换到“手部当前位置（HH）”的齐次矩阵
-        # 提取位置部分 (前三个元素)
+        H_HI_HH = copy(self.hand_init_H) # Homogeneous matrix from "hand initial position (HI)" to "hand current position (HH)"
+        H_HT_HH = copy(self.hand_moving_H) # Homogeneous matrix from "hand current frame (HT)" to "hand current position (HH)"
+        # Extract position part (first three elements)
         H_RI_RH_position = self.robot_init_position[0] 
         H_RI_RH_quaternion = self.robot_init_position[1] 
-        H_RI_RH = create_homogeneous_matrix(H_RI_RH_position,H_RI_RH_quaternion)  #从“机器人初始位置（RI）”到“机器人当前位置（RH）”的转换
+        H_RI_RH = create_homogeneous_matrix(H_RI_RH_position,H_RI_RH_quaternion)  # Transformation from "robot initial position (RI)" to "robot current position (RH)"
         rotation_matrix_ccw = np.array([
             [0, -1, 0, 0],
             [1, 0, 0, 0],
@@ -374,7 +375,7 @@ class AirbotRightOperator(Operator):
             [0, 0, 0, 1]
         ])
 
-        # 顺时针旋转 90 度
+        # Clockwise rotation 90 degrees
         rotation_matrix_cw = np.array([
             [0, 1, 0, 0],
             [-1, 0, 0, 0],
@@ -399,16 +400,16 @@ class AirbotRightOperator(Operator):
                 [[1,0,0,0],
                 [0,0,1,0],
                 [0,-1,0,-0.06],
-                [0,0,0,1]])#将手部的坐标系对齐到机器人坐标系  
+                [0,0,0,1]])# Align the hand coordinate system to the robot coordinate system  
 
-        H_HT_HI = np.linalg.pinv(H_HI_HH) @ H_HT_HH #从“手部当前帧（HT）”到“手部初始帧（HI）”的转换
-        H_RT_RH = H_RI_RH @ H_A_R @ H_HT_HI @ np.linalg.pinv(H_A_R) # 机器人如何从当前状态（RT）移动到目标位置（RH）
+        H_HT_HI = np.linalg.pinv(H_HI_HH) @ H_HT_HH # Transformation from "hand current frame (HT)" to "hand initial frame (HI)"
+        H_RT_RH = H_RI_RH @ H_A_R @ H_HT_HI @ np.linalg.pinv(H_A_R) # How the robot moves from current state (RT) to target position (RH)
         self.robot_moving_H = copy(H_RT_RH)
 
         # Use the resolution scale to get the final cart pose
         final_pose = self._get_scaled_cart_pose(self.robot_moving_H)
 
-        # 若使用滤波器，应用滤波
+        # If using filter, apply filtering
         if self.use_filter:
             final_pose = self.comp_filter(final_pose)
         # self.gripper_publisher.pub_keypoints(self.gripper_correct_state,"gripper_left")
@@ -421,9 +422,6 @@ class AirbotRightOperator(Operator):
 
         position = final_pose[:3] 
         rotation = final_pose[3:] 
-
-        with open("cartesian_states.txt", "a") as file:
-             file.write(f"{final_pose}, Gripper State: {gripper_state}\n")
 
         current_time = time.time()
         if prev_position is None:
@@ -439,52 +437,30 @@ class AirbotRightOperator(Operator):
 
 
         if gripper_state == GRIPPER_OPEN:
-            self.robot.move_gripper(open=True)  # 假设 move_gripper 函数控制打开夹爪
+            self.robot.move_gripper(open=True)  # Assuming move_gripper function controls opening the gripper
         elif gripper_state == GRIPPER_CLOSE:
-            self.robot.move_gripper(open=False)  # 控制关闭夹爪
+            self.robot.move_gripper(open=False)  # Controls closing the gripper
 
 
     def stream(self):
-        # 定义目标位置
+        # Define target position
         target_position = [0.0, -0.8, 0.8, 1.5707, -1.5707, -1.5707]
         self.robot.move(target_position)
         self.notify_component_start('{} control'.format(self.robot.name))
         print("Start controlling the AirbotArm using the Oculus Headset.\n")
         # print(self.robot.get_cartesian_state())
     
-        # while True:
-        #     try:
-        #         if self.robot.get_cartesian_state() is not None:
-        #             self.timer.start_loop()
+        while True:
+            try:
+                if self.robot.get_cartesian_state() is not None:
+                    self.timer.start_loop()
 
-        #             # Retargeting function
-        #             self._apply_retargeted_angles(log=False)
+                    # Retargeting function
+                    self._apply_retargeted_angles(log=False)
 
-        #             self.timer.end_loop()
-        #     except KeyboardInterrupt:
-        #         break
-        with open("joint_positions.txt", "a") as file:
-            while True:
-                try:
-                    if self.robot.get_cartesian_state() is not None:
-                        self.timer.start_loop()
-
-                        # Retargeting function
-                        self._apply_retargeted_angles(log=False)
-
-                        # 获取关节位置
-                        joint_position = self.robot.get_joint_position()
-                        gripper_state=self.robot.get_current_end()
-                        
-                        # 打印和保存数据
-                        # print(joint_position,gripper_state)
-                        file.write(f"{joint_position}, Gripper State: {gripper_state}\n")
-                        
-                        self.timer.end_loop()
-                except KeyboardInterrupt:
-                    print("Stopping the teleoperator!")
-                    break
+                    self.timer.end_loop()
+            except KeyboardInterrupt:
+                break
         
-
         self.transformed_arm_keypoint_subscriber.stop()
         print('Stopping the teleoperator!')
