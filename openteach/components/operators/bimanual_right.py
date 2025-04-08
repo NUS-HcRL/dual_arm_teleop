@@ -1,30 +1,82 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import zmq
-
+import time
 from mpl_toolkits.mplot3d import Axes3D
 from tqdm import tqdm
 
-from copy import deepcopy as copy
-from asyncio import threads
-from openteach.constants import *
-from openteach.utils.timer import FrequencyTimer
-from openteach.utils.network import ZMQKeypointSubscriber, ZMQKeypointPublisher
-from openteach.utils.vectorops import *
-from openteach.utils.files import *
-#from openteach.robot.franka import FrankaArm
-from openteach.robot.bimanual import Bimanual
-from scipy.spatial.transform import Rotation, Slerp
+from openteach.utils.network import ZMQKeypointSubscriber,ZMQKeypointPublisher
+from openteach.robot.bimanual_airbot_right import AirbotArmRight
 from .operator import Operator
-from scipy.spatial.transform import Rotation as R
-from numpy.linalg import pinv
+from openteach.utils.timer import FrequencyTimer
+from copy import deepcopy as copy
+from scipy.spatial.transform import Rotation
+
+prev_position = None
+move_threshold = 0.00  # 定义位置和姿态的变化阈值
 
 
+ARM_TELEOP_STOP = 0
+ARM_TELEOP_CONT = 1
+ARM_HIGH_RESOLUTION = 1
+ARM_LOW_RESOLUTION = 0
 
+VR_FREQ = 80
+GRIPPER_OPEN=1
+GRIPPER_CLOSE=0
+
+OCULUS_JOINTS = {
+    'metacarpals': [2, 6, 9, 12, 15],
+    'knuckles': [6, 9, 12, 16],
+    'thumb': [2, 3, 4, 5, 19],
+    'index': [6, 7, 8, 20],
+    'middle': [9, 10, 11, 21],
+    'ring': [12, 13, 14, 22],
+    'pinky': [15, 16, 17, 18, 23]
+}
+def convert_to_pose(matrix_4x3):
+        # 提取位置数据 (xyz)
+        position = matrix_4x3[3, :3]  # 使用最后一行的前三个元素
+        
+        # 提取旋转矩阵
+        rotation_matrix = matrix_4x3[:3, :3]  # 取前3行3列作为旋转矩阵
+        
+        # 将旋转矩阵转化为四元数
+        rotation = Rotation.from_matrix(rotation_matrix)
+        quaternion = rotation.as_quat()  # 四元数格式为 [x, y, z, w]
+        
+        # 返回包含位置和四元数的姿态
+        pose = {
+            'position': position.tolist(),
+            'quaternion': quaternion.tolist()
+        }
+        return pose
 np.set_printoptions(precision=2, suppress=True)
 
 
-# Filter for removing noise in the teleoperation
+def create_homogeneous_matrix(position, quaternion):
+    # position 是一个包含 x, y, z 的列表或数组
+    if len(position) != 3:
+        raise ValueError("Position must have exactly three components (x, y, z).")
+    
+    # quaternion 是一个包含四元数 [qw, qx, qy, qz] 的列表或数组
+    if len(quaternion) != 4:
+        raise ValueError("Quaternion must have exactly four components [qw, qx, qy, qz].")
+    
+    # 通过四元数生成旋转矩阵
+    rotation = Rotation.from_quat(quaternion)  # 使用 scipy 的 Rotation 类
+    rotation_matrix = rotation.as_matrix()  # 得到 3x3 旋转矩阵
+    
+    # 创建一个 4x4 的齐次变换矩阵
+    homo_matrix = np.eye(4)  # 初始化为单位矩阵
+    homo_matrix[:3, :3] = rotation_matrix  # 填入旋转矩阵
+    homo_matrix[:3, 3] = position  # 将位置填入最后一列
+
+    return homo_matrix
+
+
+
+# Filter to smooth out the arm cartesian state
 class Filter:
     def __init__(self, state, comp_ratio=0.6):
         self.pos_state = state[:3]
@@ -32,81 +84,93 @@ class Filter:
         self.comp_ratio = comp_ratio
 
     def __call__(self, next_state):
-        self.pos_state = self.pos_state[:3] * self.comp_ratio + next_state[:3] * (1 - self.comp_ratio)
-        ori_interp = Slerp([0, 1], Rotation.from_rotvec(
-            np.stack([self.ori_state, next_state[3:6]], axis=0)),)
-        self.ori_state = ori_interp([1 - self.comp_ratio])[0].as_rotvec()
+        self.pos_state = self.pos_state * self.comp_ratio + next_state[:3] * (1 - self.comp_ratio)
+        ori_interp = Rotation.slerp([0, 1], Rotation.from_quat(np.stack([self.ori_state, next_state[3:7]], axis=0)))
+        self.ori_state = ori_interp([1 - self.comp_ratio])[0].as_quat()
         return np.concatenate([self.pos_state, self.ori_state])
 
-# Bimanual right arm operator class
-class BimanualArmOperator(Operator):
+
+# Airbot操作类
+class AirbotRightOperator(Operator):
     def __init__(
         self,
-        host, transformed_keypoints_port,
+        host,
+        transformed_keypoints_port,
         use_filter=False,
-        arm_resolution_port = None, 
-        gripper_port =None,
+        arm_resolution_port = None,
+        # teleoperation_reset_port = None,
+        gripper_port=None,
         cartesian_publisher_port = None,
         joint_publisher_port = None,
-        cartesian_command_publisher_port = None):
-
-        self.notify_component_start('Bimanual arm operator')
-        # Transformed Arm Keypoint Subscriber
-        self._transformed_arm_keypoint_subscriber = ZMQKeypointSubscriber(
-            host=host,
-            port=transformed_keypoints_port,
-            topic='transformed_hand_frame'
-        )
-        # Transformed Hand Keypoint Subscriber
+        cartesian_command_publisher_port = None
+    ):
+        self.notify_component_start('airbot operator')
+        # 订阅器，用于获取变换后的手部关键点
         self._transformed_hand_keypoint_subscriber = ZMQKeypointSubscriber(
             host=host,
             port=transformed_keypoints_port,
             topic='transformed_hand_coords'
         )
-        # Gripper Publisher
+        self._transformed_arm_keypoint_subscriber = ZMQKeypointSubscriber(
+            host=host,
+            port=transformed_keypoints_port,
+            topic='transformed_hand_frame'
+        )
+                # Gripper and cartesian publisher
         self.gripper_publisher = ZMQKeypointPublisher(
             host=host,
             port=gripper_port
         )
-        # Cartesian Publisher
+
         self.cartesian_publisher = ZMQKeypointPublisher(
             host=host,
             port=cartesian_publisher_port
         )
-        # Joint Publisher
+
         self.joint_publisher = ZMQKeypointPublisher(
             host=host,
             port=joint_publisher_port
         )
-        # Cartesian Command Publisher
+
         self.cartesian_command_publisher = ZMQKeypointPublisher(
             host=host,
             port=cartesian_command_publisher_port
-        )
-        # Arm Resolution Subscriber
+        )    
+
+        # 初始化机器人控制器
+        self._robot = AirbotArmRight()
+        self.resolution_scale = 1  # 默认分辨率比例
+        self.arm_teleop_state = ARM_TELEOP_STOP  # 默认状态为停止
+        self.gripper_correct_state =0
+        self.pause_flag=0
+        self.prev_gripper_flag=0
+        self.gripper_flag=1
+        self.pause_cnt=0
+
+        # 订阅器，用于获取分辨率和遥控状态
         self._arm_resolution_subscriber = ZMQKeypointSubscriber(
-            host= host,
-            port= arm_resolution_port,
+            host = host,
+            port = arm_resolution_port,
             topic = 'button'
         )
-        # Define Robot object
-        self._robot = Bimanual(ip=RIGHT_ARM_IP)
-        self.robot.reset()
-       
-       
-       
-        
-        # Get the initial pose of the robot
-        home_pose=np.array(self.robot.get_cartesian_position())
-        self.robot_init_H = self.robot_pose_aa_to_affine(home_pose)
-        self._timer = FrequencyTimer(BIMANUAL_VR_FREQ) 
 
-        # Use the filter
+        # self._arm_teleop_state_subscriber = ZMQKeypointSubscriber(
+        #     host = host, 
+        #     port = teleoperation_reset_port,
+        #     topic = 'pause'
+        # )
+
+        # 机器人初始位置
+        self.robot_init_position = self.robot.get_cartesian_state()
+        self.is_first_frame = True
+
         self.use_filter = use_filter
         if use_filter:
-            robot_init_cart = self._homo2cart(self.robot_init_H)
+            robot_init_cart = self._homo2cart(self.robot.get_cartesian_position())
             self.comp_filter = Filter(robot_init_cart, comp_ratio=0.8)
-            
+
+        self._timer = FrequencyTimer(VR_FREQ)
+
         # Class variables
         self.gripper_flag=1
         self.pause_flag=1
@@ -130,55 +194,38 @@ class BimanualArmOperator(Operator):
     @property
     def transformed_hand_keypoint_subscriber(self):
         return self._transformed_hand_keypoint_subscriber
-
+    
     @property
     def transformed_arm_keypoint_subscriber(self):
         return self._transformed_arm_keypoint_subscriber
-        
-    
-    def robot_pose_aa_to_affine(self,pose_aa: np.ndarray) -> np.ndarray:
-        """Converts a robot pose in axis-angle format to an affine matrix.
-        Args:
-            pose_aa (list): [x, y, z, ax, ay, az] where (x, y, z) is the position and (ax, ay, az) is the axis-angle rotation.
-            x, y, z are in mm and ax, ay, az are in radians.
-        Returns:
-            np.ndarray: 4x4 affine matrix [[R, t],[0, 1]]
-        """
 
-        rotation = R.from_rotvec(pose_aa[3:]).as_matrix()
-        translation = np.array(pose_aa[:3]) / SCALE_FACTOR
-
-        return np.block([[rotation, translation[:, np.newaxis]],[0, 0, 0, 1]])
-    
-    #Function to differentiate between real and simulated robot
-    def return_real(self):
-        return True
-
-    # Function Gets the transformed hand frame
+    # Get the hand frame
     def _get_hand_frame(self):
-        data = None  # Initialize with a default value
         for i in range(10):
             data = self.transformed_arm_keypoint_subscriber.recv_keypoints(flags=zmq.NOBLOCK)
-            if data is not None:
-                break 
-        if data is None:
-            return None
+            if not data is None: break 
+        if data is None: return None
         return np.asanyarray(data).reshape(4, 3)
     
-    # Function to get the resolution scale mode
+    # Get the arm teleop state from the hand keypoints
+    def _get_arm_teleop_state_from_hand_keypoints(self):
+        pause_state ,pause_status,pause_left =self.get_pause_state_from_hand_keypoints()
+        pause_status =np.asanyarray(pause_status).reshape(1)[0] 
+        return pause_state,pause_status,pause_left
+    
+    # Get the resolution scale mode (High or Low)
     def _get_resolution_scale_mode(self):
         data = self._arm_resolution_subscriber.recv_keypoints()
         res_scale = np.asanyarray(data).reshape(1)[0] # Make sure this data is one dimensional
-        return res_scale
-    
-    # Function to get the arm teleop state from the hand keypoints
-    def _get_arm_teleop_state_from_hand_keypoints(self):
-        pause_state ,pause_status,pause_right =self.get_pause_state_from_hand_keypoints()
-        pause_status =np.asanyarray(pause_status).reshape(1)[0] 
+        return res_scale  
 
-        return pause_state,pause_status,pause_right
+    # # Get the teleop state (Pause or Continue)
+    # def _get_arm_teleop_state(self):
+    #     reset_stat = self._arm_teleop_state_subscriber.recv_keypoints()
+    #     reset_stat = np.asanyarray(reset_stat).reshape(1)[0] # Make sure this data is one dimensional
+    #     return reset_stat
 
-    # Function to turn a frame to a homogeneous matrix
+    # Converts a frame to a homogenous transformation matrix
     def _turn_frame_to_homo_mat(self, frame):
         t = frame[0]
         R = frame[1:]
@@ -189,84 +236,63 @@ class BimanualArmOperator(Operator):
         homo_mat[3, 3] = 1
 
         return homo_mat
-
-    # Function to turn homogenous matrix to cartesian vector
+    
+    # Converts Homogenous Transformation Matrix to Cartesian Coords
     def _homo2cart(self, homo_mat):
-        # Here we will use the resolution scale to set the translation resolution
+        
         t = homo_mat[:3, 3]
         R = Rotation.from_matrix(
-            homo_mat[:3, :3]).as_rotvec(degrees=False)
+            homo_mat[:3, :3]).as_quat()
 
         cart = np.concatenate(
             [t, R], axis=0
         )
+
         return cart
     
-
-    # Get the scaled cartesian pose
+    # Gets the Scaled Resolution pose
     def _get_scaled_cart_pose(self, moving_robot_homo_mat):
         # Get the cart pose without the scaling
         unscaled_cart_pose = self._homo2cart(moving_robot_homo_mat)
 
-        # Get the current cart pose
-        home_pose = self.robot.get_cartesian_position()
-        home_pose_array = np.array(home_pose)  # Convert tuple to numpy array
-        current_homo_mat = self.robot_pose_aa_to_affine(home_pose_array)
-        current_cart_pose = home_pose_array#self._homo2cart(current_homo_mat)
+        cartesian_state = self.robot.get_cartesian_state()
+        position = cartesian_state[0]
+        quaternion = [0,0,0,1]
+        current_homo_mat = copy(create_homogeneous_matrix(position,quaternion))
+        current_cart_pose = self._homo2cart(current_homo_mat)
 
         # Get the difference in translation between these two cart poses
         diff_in_translation = unscaled_cart_pose[:3] - current_cart_pose[:3]
         scaled_diff_in_translation = diff_in_translation * self.resolution_scale
+        # print('SCALED_DIFF_IN_TRANSLATION: {}'.format(scaled_diff_in_translation))
         
-        scaled_cart_pose = np.zeros(6)
+        scaled_cart_pose = np.zeros(7)
         scaled_cart_pose[3:] = unscaled_cart_pose[3:] # Get the rotation directly
         scaled_cart_pose[:3] = current_cart_pose[:3] + scaled_diff_in_translation # Get the scaled translation only
 
         return scaled_cart_pose
 
-    # Reset Teleoperation and make the current frame as initial frame
+    # Reset the teleoperation and get the first frame
     def _reset_teleop(self):
+        # Just updates the beginning position of the arm
         print('****** RESETTING TELEOP ****** ')
-        home_pose = self.robot.get_cartesian_position()
-        home_pose_array = np.array(home_pose)  # Convert tuple to numpy array
-        self.robot_init_H = self.robot_pose_aa_to_affine(home_pose_array)
+        self.robot_init_position = self.robot.get_cartesian_state()
         first_hand_frame = self._get_hand_frame()
         while first_hand_frame is None:
             first_hand_frame = self._get_hand_frame()
         self.hand_init_H = self._turn_frame_to_homo_mat(first_hand_frame)
         self.hand_init_t = copy(self.hand_init_H[:3, 3])
         self.is_first_frame = False
-        print("Resetting complete")
         return first_hand_frame
 
-    # Function to get gripper state from hand keypoints
-    def get_gripper_state_from_hand_keypoints(self):
-        transformed_hand_coords= self._transformed_hand_keypoint_subscriber.recv_keypoints()
-        distance = np.linalg.norm(transformed_hand_coords[OCULUS_JOINTS['pinky'][-1]]- transformed_hand_coords[OCULUS_JOINTS['thumb'][-1]])
-        thresh = 0.03
-        gripper_fl =False
-        if distance < thresh:
-            self.gripper_cnt+=1
-            if self.gripper_cnt==1:
-                self.prev_gripper_flag = self.gripper_flag
-                self.gripper_flag = not self.gripper_flag 
-                gripper_fl=True
-        else: 
-            self.gripper_cnt=0
-        gripper_state = np.asanyarray(self.gripper_flag).reshape(1)[0]
-        status= False  
-        if gripper_state!= self.prev_gripper_flag:
-            status= True
-        return gripper_state , status , gripper_fl 
-   
-    # Toggle the robot to pause/resume using ring/middle finger pinch, both finger modes are supported to avoid any hand pose noise issue
+
     def get_pause_state_from_hand_keypoints(self):
-        transformed_hand_coords= self._transformed_hand_keypoint_subscriber.recv_keypoints()
+        transformed_hand_coords= self.transformed_hand_keypoint_subscriber.recv_keypoints()
         ring_distance = np.linalg.norm(transformed_hand_coords[OCULUS_JOINTS['ring'][-1]]- transformed_hand_coords[OCULUS_JOINTS['thumb'][-1]])
         middle_distance = np.linalg.norm(transformed_hand_coords[OCULUS_JOINTS['middle'][-1]]- transformed_hand_coords[OCULUS_JOINTS['thumb'][-1]])
-        thresh = 0.03 
+        thresh = 0.04 
         pause_right= True
-        if ring_distance < thresh  or middle_distance < thresh:
+        if ring_distance < thresh or middle_distance < thresh:
             self.pause_cnt+=1
             if self.pause_cnt==1:
                 self.prev_pause_flag=self.pause_flag
@@ -278,85 +304,187 @@ class BimanualArmOperator(Operator):
         if pause_state!= self.prev_pause_flag:
             pause_status= True 
         return pause_state , pause_status , pause_right
+    def get_gripper_state_from_hand_keypoints(self):
+        transformed_hand_coords= self.transformed_hand_keypoint_subscriber.recv_keypoints()
+        pinky_distance = np.linalg.norm(transformed_hand_coords[OCULUS_JOINTS['pinky'][-1]]- transformed_hand_coords[OCULUS_JOINTS['thumb'][-1]])
+        thresh = 0.03
+        gripper_fr =False
+        if pinky_distance < thresh:
+            self.gripper_cnt+=1
+            if self.gripper_cnt==1:
+                self.prev_gripper_flag = self.gripper_flag
+                self.gripper_flag = not self.gripper_flag 
+                gripper_fl=True
+        else: 
+            self.gripper_cnt=0
 
-    # Function to apply retargeted angles
+        gripper_state = np.asanyarray(self.gripper_flag).reshape(1)[0]
+        status= False  
+        if gripper_state!= self.prev_gripper_flag:
+            status= True
+        return gripper_state , status , gripper_fr
+    
+    # Apply the retargeted angles
     def _apply_retargeted_angles(self, log=False):
-
-        # See if there is a reset in the teleop state
-        new_arm_teleop_state,pause_status,pause_right = self._get_arm_teleop_state_from_hand_keypoints()
+        global prev_position
+        # 检查是否需要重置操作状态
+        new_arm_teleop_state,pause_status,pause_left = self._get_arm_teleop_state_from_hand_keypoints()
+        if new_arm_teleop_state == ARM_TELEOP_STOP:
+            print("Right arm is stopped")
+            return  # 直接返回，不进行任何更新
+        
         if self.is_first_frame or (self.arm_teleop_state == ARM_TELEOP_STOP and new_arm_teleop_state == ARM_TELEOP_CONT):
-            moving_hand_frame = self._reset_teleop() # Should get the moving hand frame only once
+            self._reset_teleop()  # 重置操作
+            moving_hand_frame = None
         else:
-            moving_hand_frame = self._get_hand_frame()
+            moving_hand_frame = self._get_hand_frame()  # 获取当前手部框架
         self.arm_teleop_state = new_arm_teleop_state
+        # print(moving_hand_frame)
         arm_teleoperation_scale_mode = self._get_resolution_scale_mode()
-
         if arm_teleoperation_scale_mode == ARM_HIGH_RESOLUTION:
             self.resolution_scale = 1
         elif arm_teleoperation_scale_mode == ARM_LOW_RESOLUTION:
             self.resolution_scale = 0.6
 
-
-        if moving_hand_frame is None: 
-            return # It means we are not on the arm mode yet instead of blocking it is directly returning
-        
+        gripper_state,status_change, gripper_flag = self.get_gripper_state_from_hand_keypoints()
+        if self.gripper_cnt==1 and status_change is True:
+            self.gripper_correct_state= gripper_state
+        # if status_change is True:
+        if self.gripper_correct_state == GRIPPER_OPEN:
+            gripper_state = 1
+        elif self.gripper_correct_state == GRIPPER_CLOSE:
+            gripper_state = 0
+        # 若未获取到手部框架，返回
+        if moving_hand_frame is None:
+            return
+        # print(self.gripper_correct_state)
         self.hand_moving_H = self._turn_frame_to_homo_mat(moving_hand_frame)
 
         # Transformation code
-        H_HI_HH = copy(self.hand_init_H) # Homo matrix that takes P_HI to P_HH - Point in Inital Hand Frame to Point in Home Hand Frame
-        H_HT_HH = copy(self.hand_moving_H) # Homo matrix that takes P_HT to P_HH
-        H_RI_RH = copy(self.robot_init_H) # Homo matrix that takes P_RI to P_RH
-       
-        H_HT_HI = np.linalg.pinv(H_HI_HH) @ H_HT_HH # Homo matrix that takes P_HT to P_HI
+        H_HI_HH = copy(self.hand_init_H) #从“手部初始位置（HI）”转换到“手部当前位置（HH）”的齐次矩阵
+        H_HT_HH = copy(self.hand_moving_H) #从“手部当前帧（HT）”转换到“手部当前位置（HH）”的齐次矩阵
+        # 提取位置部分 (前三个元素)
+        H_RI_RH_position = self.robot_init_position[0] 
+        H_RI_RH_quaternion = self.robot_init_position[1] 
+        H_RI_RH = create_homogeneous_matrix(H_RI_RH_position,H_RI_RH_quaternion)  #从“机器人初始位置（RI）”到“机器人当前位置（RH）”的转换
+        rotation_matrix_ccw = np.array([
+            [0, -1, 0, 0],
+            [1, 0, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ])
 
-        # Here there are two matrices because the rotation is asymmetric and we imagine we are holding the endeffector and moving the robot.
-        H_R_V= np.array([[0 , 0, -1, 0], 
-                        [0 , -1, 0, 0],
-                        [-1, 0, 0, 0],
-                        [0, 0 ,0 , 1]])
+        # 顺时针旋转 90 度
+        rotation_matrix_cw = np.array([
+            [0, 1, 0, 0],
+            [-1, 0, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1]
+        ])
+        rotation_matrix_y_90 = np.array([
+            [0, 0, 1, 0],
+            [0, 1, 0, 0],
+            [-1, 0, 0, 0],
+            [0, 0, 0, 1]
+        ])
+        rotation_matrix_y_180 = np.array([
+            [-1, 0, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, -1, 0],
+            [0, 0, 0, 1]
+        ])
 
-        # The translation is completely symmetric and mimics your hand movement and we imagine we are holding the endeffector and moving the robot.
-        H_T_V = np.array([[0, 0 ,1, 0],
-                         [0 ,1, 0, 0],
-                         [-1, 0, 0, 0],
-                        [0, 0, 0, 1]])
 
-        H_HT_HI_r=(pinv(H_R_V) @ H_HT_HI @ H_R_V)[:3,:3] # Finding th
-        H_HT_HI_t=(pinv(H_T_V) @ H_HT_HI @ H_T_V)[:3,3]
-         
-        relative_affine = np.block(
-        [[ H_HT_HI_r,  H_HT_HI_t.reshape(3, 1)], [0, 0, 0, 1]])
-        target_translation = H_RI_RH[:3,3] + relative_affine[:3,3]
+        H_A_R = rotation_matrix_y_180@rotation_matrix_y_90@rotation_matrix_cw@np.array( 
+                [[1,0,0,0],
+                [0,0,1,0],
+                [0,-1,0,-0.06],
+                [0,0,0,1]])#将手部的坐标系对齐到机器人坐标系  
 
-        target_rotation = H_RI_RH[:3, :3] @ relative_affine[:3,:3]
-        H_RT_RH = np.block(
-                    [[target_rotation, target_translation.reshape(-1, 1)], [0, 0, 0, 1]])
-
+        H_HT_HI = np.linalg.pinv(H_HI_HH) @ H_HT_HH #从“手部当前帧（HT）”到“手部初始帧（HI）”的转换
+        H_RT_RH = H_RI_RH @ H_A_R @ H_HT_HI @ np.linalg.pinv(H_A_R) # 机器人如何从当前状态（RT）移动到目标位置（RH）
         self.robot_moving_H = copy(H_RT_RH)
-        final_pose = self._get_scaled_cart_pose(self.robot_moving_H)
-        final_pose[0:3]=final_pose[0:3]*1000
 
-        # Apply the filter
+        # Use the resolution scale to get the final cart pose
+        final_pose = self._get_scaled_cart_pose(self.robot_moving_H)
+
+        # 若使用滤波器，应用滤波
         if self.use_filter:
             final_pose = self.comp_filter(final_pose)
+        # self.gripper_publisher.pub_keypoints(self.gripper_correct_state,"gripper_left")
+        # position=self.robot.get_cartesian_position()
+        # joint_position= self.robot.get_joint_position()
+        # self.cartesian_publisher.pub_keypoints(position,"cartesian")
+        # self.joint_publisher.pub_keypoints(joint_position,"joint")
+        # self.cartesian_command_publisher.pub_keypoints(final_pose,"cartesian")
+        # print(final_pose)
 
-        gripper_state,status_change, gripper_flag =self.get_gripper_state_from_hand_keypoints()
-        if gripper_flag ==1 and status_change is True:
-            self.gripper_correct_state=gripper_state
-            self.robot.set_gripper_state(self.gripper_correct_state*800)
+        position = final_pose[:3] 
+        rotation = final_pose[3:] 
+
+        with open("cartesian_states.txt", "a") as file:
+             file.write(f"{final_pose}, Gripper State: {gripper_state}\n")
+
+        current_time = time.time()
+        if prev_position is None:
+            prev_position = position
+        else:
+            position_np = np.array(position)
+            prev_position_np = np.array(prev_position)
+
+            if np.linalg.norm(position_np - prev_position_np) > move_threshold:
+                # print(f"Time: {current_time}, Moving to position: {position}")
+                self.robot.move_coords(position, rotation, velocity=0.5)
+                prev_position = position
+
+
+        if gripper_state == GRIPPER_OPEN:
+            self.robot.move_gripper(open=True)  # 假设 move_gripper 函数控制打开夹爪
+        elif gripper_state == GRIPPER_CLOSE:
+            self.robot.move_gripper(open=False)  # 控制关闭夹爪
+
+
+    def stream(self):
+        # 定义目标位置
+        target_position = [0.0, -0.8, 0.8, 1.5707, -1.5707, -1.5707]
+        self.robot.move(target_position)
+        self.notify_component_start('{} control'.format(self.robot.name))
+        print("Start controlling the AirbotArm using the Oculus Headset.\n")
+        # print(self.robot.get_cartesian_state())
+    
+        # while True:
+        #     try:
+        #         if self.robot.get_cartesian_state() is not None:
+        #             self.timer.start_loop()
+
+        #             # Retargeting function
+        #             self._apply_retargeted_angles(log=False)
+
+        #             self.timer.end_loop()
+        #     except KeyboardInterrupt:
+        #         break
+        with open("joint_positions.txt", "a") as file:
+            while True:
+                try:
+                    if self.robot.get_cartesian_state() is not None:
+                        self.timer.start_loop()
+
+                        # Retargeting function
+                        self._apply_retargeted_angles(log=False)
+
+                        # 获取关节位置
+                        joint_position = self.robot.get_joint_position()
+                        gripper_state=self.robot.get_current_end()
+                        
+                        # 打印和保存数据
+                        # print(joint_position,gripper_state)
+                        file.write(f"{joint_position}, Gripper State: {gripper_state}\n")
+                        
+                        self.timer.end_loop()
+                except KeyboardInterrupt:
+                    print("Stopping the teleoperator!")
+                    break
         
-        # We save the states here during teleoperation as saving directly at 90Hz seems to be too fast for XArm.
-        self.gripper_publisher.pub_keypoints(self.gripper_correct_state,"gripper_right")
-        position=self.robot.get_cartesian_position()
-        joint_position= self.robot.get_joint_position()
-        self.cartesian_publisher.pub_keypoints(position,"cartesian")
-        self.joint_publisher.pub_keypoints(joint_position,"joint")
-        self.cartesian_command_publisher.pub_keypoints(final_pose, "cartesian")
-        
-        if self.arm_teleop_state == ARM_TELEOP_CONT and gripper_flag == False:
-            self.robot.arm_control(final_pose)
 
-       
-        
-
-
+        self.transformed_arm_keypoint_subscriber.stop()
+        print('Stopping the teleoperator!')
