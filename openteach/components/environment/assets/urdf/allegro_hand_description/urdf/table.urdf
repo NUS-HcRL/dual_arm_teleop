@@ -29,7 +29,7 @@
     </inertial>
     <visual>
       <geometry>
-        <mesh filename="../meshes/table/robot_stand.obj"/>
+        <mesh filename="../meshes/table/table.obj"/>
       </geometry>
     </visual>
     <collision>

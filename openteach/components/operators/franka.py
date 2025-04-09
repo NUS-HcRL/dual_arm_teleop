@@ -17,6 +17,7 @@ from .operator import Operator
 
 
 
+
 np.set_printoptions(precision=2, suppress=True)
 # Filter to smooth out the arm cartesian state
 class Filter:

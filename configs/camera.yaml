@@ -5,9 +5,14 @@ defaults:
   - override hydra/job_logging: disabled 
 
 robot_cam_serial_numbers:
-  - '141722071999' # close to the robot
-  - '138422075648' # on top left corner
-  - '023422073116'
+  # - '141722071999' # close to the robot
+  # - '138422075648' # on top left corner
+  # - '243222071389'
+  
+  - '243322074422'
+  # - '243522071794'
+  # - '243222074218'
+
 
 cam_configs:
   width: 1280

@@ -6,7 +6,7 @@ from mpl_toolkits.mplot3d import Axes3D
 from tqdm import tqdm
 
 from copy import deepcopy as copy
-from asyncio import threads
+# from asyncio import threads
 from openteach.constants import *
 from openteach.utils.timer import FrequencyTimer
 from openteach.utils.network import ZMQKeypointSubscriber, ZMQKeypointPublisher

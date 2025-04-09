@@ -33,7 +33,7 @@ OCULUS_VIEW_LIMITS = {
     'y_limits': [-0.02, 0.25],
     'z_limits': [-0.04, 0.04]
 }
-
+#这里是frequency
 VR_FREQ = 60
 BIMANUAL_VR_FREQ = 90
 LIBERO_FREQ = 20

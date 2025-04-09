@@ -1,9 +1,9 @@
-name: openteach_isaac
+name: teleop
 channels:
   - defaults
 dependencies:
   - pip
-  - python=3.7
+  - python=3.8
   - sqlite=3.41.2
   - pyyaml=6.0 
 

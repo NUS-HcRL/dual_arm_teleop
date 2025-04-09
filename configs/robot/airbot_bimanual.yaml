@@ -1,4 +1,4 @@
-robot_name: bimanual
+robot_name: airbot_bimanual
 
 # Detector used to teleoperate the robot
 detector:
@@ -9,7 +9,8 @@ detector:
   keypoint_pub_port: ${keypoint_port}
   button_port: ${resolution_button_port}
   button_publish_port: ${resolution_button_publish_port}
-  
+  # teleop_reset_port: ${teleop_reset_port}
+  # teleop_reset_publish_port: ${teleop_reset_publish_port}
 
 # Transformation classes used to transform the keypoints
 transforms:
@@ -39,42 +40,41 @@ visualizers:
 # Operators used to retarget the keypoints
 operators:
   - 
-    _target_: openteach.components.operators.bimanual_right.BimanualArmOperator
+    _target_: openteach.components.operators.bimanual_airbot_right.AirbotRightOperator
     host: ${host_address}
     transformed_keypoints_port: ${transformed_position_keypoint_port}
     arm_resolution_port: ${resolution_button_publish_port} 
     gripper_port: ${gripper_publish_port_right}
-    use_filter: True
+    use_filter: False
     cartesian_publisher_port: ${cartesian_publisher_port}
     joint_publisher_port: ${joint_publisher_port}
     cartesian_command_publisher_port: ${cartesian_command_publisher_port}
     
   -
-    _target_: openteach.components.operators.bimanual_left.AirbotLeftOperator
+    _target_: openteach.components.operators.bimanual_airbot_left.AirbotLeftOperator
     host: ${host_address}
     transformed_keypoints_port: ${transformed_position_left_keypoint_port}
     arm_resolution_port: ${resolution_button_publish_port} 
     gripper_port: ${gripper_publish_port_left}
-    use_filter: True
+    use_filter: False
     cartesian_publisher_port: ${cartesian_publisher_port_left}
     joint_publisher_port: ${joint_publisher_port_left}
     cartesian_command_publisher_port: ${cartesian_command_publisher_port_left}
 
 # List of controller classes used
 controllers:
- 
+
   -
-    _target_: openteach.robot.bimanual.Bimanual
-    ip: ${right_xarm_ip}
+    _target_: openteach.robot.bimanual_airbot_right.AirbotArmRight
+    # ip: ${right_xarm_ip}
     record: False
 
   -
-    _target_: openteach.robot.bimanual_left.BimanualLeft
-    ip: ${left_xarm_ip}
+    _target_: openteach.robot.bimanual_airbot_left.AirbotArmLeft
+    # ip: ${left_xarm_ip}
     record: False
 
-
-# Information to be recorded for the robot 
+# Information to be recorded by the robot 
 recorded_data:
   - 
     - joint_states
