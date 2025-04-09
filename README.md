@@ -1,67 +1,69 @@
-# OPEN TEACH: A Versatile Teleoperation System for Robotic Manipulation
+# OPEN TEACH: Airbot Teleoperation System Integration
 
-##### Authors: Aadhithya Iyer ,Zhuoran Peng, Yinlong Dai, Irmak Guzey, Siddhant Haldar, Soumith Chintala, Lerrel Pinto 
+### Environment Setup
 
-[Paper](https://arxiv.org/abs/2403.07870) [Website](https://open-teach.github.io/)
+1. Install the required conda environment:
 
-This is the official implementation of the Open Teach including unity scripts for the VR application, teleoperation pipeline and demonstration collection pipeline.
+**Allegro Sim**:
+```bash
+conda env create -f env_isaac.yml
+```
 
-Open Teach consists of two parts. 
+**Other Environments**:
+```bash
+conda env create -f environment.yml
+```
 
-- [x] Teleoperation using Meta Quest 3 and data collection over a range of robot morphologies and simulation environments.
+2. After installing the dependencies, install the pipeline package using pip:
+```bash
+pip install -e .
+```
 
-- [x] Policy training for various dexterous manipulation tasks across different robots and simulations.
+3. Verify the installation by running the following command:
+```bash
+import openteach
+```
 
-### VR Code and User Interface
+### Launch Meta Quest 3
 
-Read VR specific information, User Interface and APK files [here](/docs/vr.md)
+1. Use **SideQuest** to connect the Meta Quest 3 to your computer. Make sure your VR device is properly connected and developer mode is enabled.
 
-### Server Code Installation 
+2. Open the APK file on the Meta Quest 3:
 
-Install the conda environment from the yaml file in the codebase
+   - **BimanualArm.apk**: For bimanual operation.
+   - **SingleArmBot.apk**: For single-arm operation.
 
-**Allegro Sim**
+### Start Camera Sensors
 
-`conda env create -f env_isaac.yml`
+1. Ensure the camera is connected before starting.
+2. Modify the RealSense number in `configs/camera.yaml` and run the following command to start the server:
+```bash
+bash launch_server.sh
+```
 
-**Others**
+### Launch Airbot Robot Arm
 
-`conda env create -f environment.yml`
+Open Teach supports the following three Airbot control modes:
 
-This will install all the dependencies required for the server code.  
+1. **Airbot Bimanual**: For bimanual operation.
+2. **Airbot ROS**: For integration with ROS.
+3. **Airbot**: For standard single-arm control.
 
-After installing all the prerequisites, you can install this pipeline as a package with pip:
+Choose the appropriate mode and start by running the following commands:
 
-`pip install -e . `
+- For bimanual mode:
+  ```bash
+  python teleop.py robot=airbot_bimanual
+  ```
+- For ROS mode:
+  ```bash
+  python teleop.py robot=airbot_ros
+  ```
+- For single-arm mode:
+  ```bash
+  python teleop.py robot=airbot
+  ```
 
-You can test if it had installed correctly by running ` import openteach` from the python shell.
-
-### Robot Controller Installation Specific Information
-
-1. For Simulation specific information, follow the instructions [here](/docs/simulation.md).
-
-2. For Robot controller installation, follow the instructions [here](https://github.com/NYU-robot-learning/OpenTeach-Controllers)
-
-### For starting the camera sensors
-
-For starting the camera sensors and streaming them inside the screen in the oculus refer [here](/docs/sensors.md)
-
-### Running the Teleoperation and Data Collection
-
-For information on running the teleoperation and data collection refer [here](/docs/teleop_data_collect.md).
-
-
-### Policy Learning 
-
-For open-source code of the policies we trained on the robots refer [here](/docs/policy_learning.md) 
-
-### Policy Learning API
-
-For using the API we use for policy learning, use [this](https://github.com/NYU-robot-learning/Open-Teach-API)
-
-### Call for contributions
-
-For adding your own robot and simulation refer [here](/docs/add_your_own_robot.md)
 
 ### Citation
 If you use this repo in your research, please consider citing the paper as follows:
